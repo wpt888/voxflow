@@ -12,7 +12,7 @@ XDG_SHELL = $(shell $(PKG_CONFIG) --variable=pkgdatadir wayland-protocols)/stabl
 PREFIX ?= $(HOME)/.local
 PROTOCOL = protocols/wlr-layer-shell-unstable-v1.xml
 
-.PHONY: all install setup bar-setup clean test
+.PHONY: all install setup bar-setup backup-setup clean test
 all: build/voxflow
 
 build:
@@ -49,6 +49,10 @@ setup: install
 
 bar-setup: install
 	$(PYTHON) scripts/setup_bar.py "$(PREFIX)" "$(DESTDIR)"
+
+backup-setup: bar-setup
+	install -Dm755 scripts/dictation-router "$(PREFIX)/libexec/voxflow-dictation-router"
+	$(PYTHON) scripts/setup.py "$(PREFIX)" "$(DESTDIR)" --superwhisper-backup
 
 clean:
 	rm -rf build

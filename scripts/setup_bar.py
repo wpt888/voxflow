@@ -31,7 +31,6 @@ def install_bar(prefix, plugin_root):
             raise ValueError("The VoxFlow bar widget is missing its executable setting.")
         executable = json.dumps(str(prefix / "bin" / "voxflow"), ensure_ascii=False)
         widget.write_text(text.replace(EXECUTABLE_EXPRESSION, executable), encoding="utf-8")
-        shutil.copyfile(ROOT / "assets" / "voxflow.png", staged / "voxflow.png")
         subprocess.run(["omarchy", "plugin", "validate", str(staged)], check=True, timeout=10)
 
         if not destination.exists():

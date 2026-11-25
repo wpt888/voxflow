@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 import runpy
@@ -138,8 +139,6 @@ class SetupTest(unittest.TestCase):
             install_bar(self.prefix, plugins)
             self.assertIn(str(self.prefix / "bin/voxflow"),
                           (destination / "BarWidget.qml").read_text())
-            self.assertEqual((destination / "voxflow.png").read_bytes(),
-                             (ROOT / "assets/voxflow.png").read_bytes())
             self.assertTrue((destination / "i18n/en.json").is_file())
             marker = destination / "user-file"
             marker.write_text("keep")
@@ -150,6 +149,42 @@ class SetupTest(unittest.TestCase):
             self.assertEqual(run.call_args.args[0],
                              ["omarchy", "bar", "put", "local.voxflow", "--section", "right",
                               "--after", "omarchy.tray"])
+
+    def test_backup_setup_replaces_superwhisper_bindings_once(self):
+        main = self.hypr / "hyprland.lua"
+        main.write_text('require("hypr.bindings")\n')
+        self.stub("superwhisper", "exit 0")
+        superwhisper = json.dumps(str(self.tools / "superwhisper"))
+        original = (
+            "-- user bindings\r\n"
+            "-- BEGIN SUPERWHISPER KEYBINDINGS\r\n"
+            "do\r\n"
+            f"    local superwhisper = {superwhisper}\r\n"
+            '    hl.bind("code:108", hl.dsp.exec_cmd(superwhisper .. " start"))\r\n'
+            '    hl.bind("code:108", hl.dsp.exec_cmd(superwhisper .. " stop"), { release = true })\r\n'
+            '    hl.bind("SUPER + SHIFT + Escape", hl.dsp.exec_cmd(superwhisper .. " cancel"))\r\n'
+            "end\r\n"
+            "-- END SUPERWHISPER KEYBINDINGS\r\n"
+            "-- other shortcuts\r\n"
+        ).encode()
+        bindings = self.hypr / "bindings.lua"
+        bindings.write_bytes(original)
+        setup = runpy.run_path(str(ROOT / "scripts/setup.py"))["setup"]
+        with mock.patch.dict(os.environ, self.env, clear=True), mock.patch("subprocess.run") as run:
+            setup(self.prefix, "", backup_mode=True)
+            run.assert_called_once_with([self.prefix / "bin/voxflow", "stop"], check=True, timeout=5)
+            run.reset_mock()
+            setup(self.prefix, "", backup_mode=True)
+            run.assert_not_called()
+        updated = bindings.read_bytes()
+        self.assertIn(b"voxflow-dictation-router", updated)
+        for action in (b"press", b"release", b"cancel"):
+            self.assertIn(b'voxflow .. " ' + action + b'"', updated)
+        self.assertTrue(updated.startswith(b"-- user bindings\r\n"))
+        self.assertTrue(updated.endswith(b"-- other shortcuts\r\n"))
+        self.assertNotIn(b"\n", updated.replace(b"\r\n", b""))
+        saved, = self.hypr.glob("bindings.lua.voxflow-backup-*")
+        self.assertEqual(saved.read_bytes(), original)
 
 
 if __name__ == "__main__":

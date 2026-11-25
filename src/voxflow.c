@@ -36,11 +36,12 @@ enum {
 };
 
 enum session_phase { READY = 'R', RECORDING = 'M', TRANSCRIBING = 'T' };
-enum { PHASE_OFFSET = 0, PAUSE_OFFSET = 1 };
+enum { PHASE_OFFSET = 0, PAUSE_OFFSET = 1, SETTINGS_OFFSET = 2 };
 
 struct job {
     int commands;
     int lock;
+    const char *stopped;
     struct indicator *indicator;
     enum session_phase phase;
     bool released;
@@ -146,6 +147,43 @@ static bool is_paused(int lock)
     return pread(lock, &value, 1, PAUSE_OFFSET) == 1 && value == 'P';
 }
 
+static bool is_stopped(const char *path)
+{
+    return path && access(path, F_OK) == 0;
+}
+
+static bool make_state_directory(char *path)
+{
+    if (mkdir(path, 0700) == 0 || errno == EEXIST)
+        return true;
+    if (errno != ENOENT)
+        return false;
+
+    char *parent = strrchr(path, '/');
+    if (!parent || parent == path)
+        return false;
+    *parent = '\0';
+    bool created = make_state_directory(path);
+    *parent = '/';
+    return created && (mkdir(path, 0700) == 0 || errno == EEXIST);
+}
+
+static char *stopped_path(void)
+{
+    const char *state = getenv("XDG_STATE_HOME");
+    char *path = NULL;
+    if (state && state[0] == '/') {
+        if (asprintf(&path, "%s/voxflow-stopped", state) < 0)
+            return NULL;
+    } else {
+        const char *home = getenv("HOME");
+        if (!home || home[0] != '/' ||
+            asprintf(&path, "%s/.local/state/voxflow-stopped", home) < 0)
+            return NULL;
+    }
+    return path;
+}
+
 static void set_phase(struct job *job, enum session_phase phase)
 {
     if (job->phase == phase)
@@ -155,7 +193,7 @@ static void set_phase(struct job *job, enum session_phase phase)
         syslog(LOG_WARNING, "Could not update VoxFlow's bar status.");
 }
 
-static int session_status(int directory, const char *name, bool print_path)
+static int session_status(int directory, const char *name, bool print_path, const char *stopped)
 {
     int lock = open_session_lock(directory);
     if (lock < 0)
@@ -167,6 +205,12 @@ static int session_status(int directory, const char *name, bool print_path)
         while (length > 0 && runtime[length - 1] == '/')
             length--;
         printf("%.*s/%s/lock\n", (int)length, runtime, name);
+        return 0;
+    }
+
+    if (is_stopped(stopped)) {
+        close(lock);
+        puts("stopped");
         return 0;
     }
 
@@ -219,16 +263,50 @@ static int send_command(int directory, char command)
     return report("Could not deliver the VoxFlow control command.");
 }
 
-static int set_paused(int directory, bool paused)
+static int pause_session(int directory)
 {
     int lock = open_session_lock(directory);
     if (lock < 0)
         return report("Could not open the VoxFlow session lock.");
-    bool saved = write_lock_byte(lock, PAUSE_OFFSET, paused ? 'P' : 'E');
+    bool saved = write_lock_byte(lock, PAUSE_OFFSET, 'P');
     close(lock);
     if (!saved)
         return report("Could not update VoxFlow's paused state.");
-    return paused ? send_command(directory, 'c') : 0;
+    return send_command(directory, 'c');
+}
+
+static int set_stopped(int directory, char *path, bool stop)
+{
+    if (!path)
+        return report("Could not find the VoxFlow state directory.");
+    int lock = open_session_lock(directory);
+    if (lock < 0)
+        return report("Could not open the VoxFlow session lock.");
+
+    bool saved;
+    if (stop) {
+        char *filename = strrchr(path, '/');
+        *filename = '\0';
+        bool created = make_state_directory(path);
+        *filename = '/';
+        int marker = created ? open(path, O_RDONLY | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600) : -1;
+        saved = marker >= 0;
+        if (saved)
+            close(marker);
+    } else {
+        saved = unlink(path) == 0 || errno == ENOENT;
+    }
+    if (saved) {
+        if (!stop)
+            saved = write_lock_byte(lock, PAUSE_OFFSET, 'E');
+        /* Notify the bar's watcher when the setting lives outside the session. */
+        if (!write_lock_byte(lock, SETTINGS_OFFSET, '\n'))
+            syslog(LOG_WARNING, "Could not update VoxFlow's bar status.");
+    }
+    close(lock);
+    if (!saved)
+        return report("Could not save whether VoxFlow is on or off.");
+    return stop ? send_command(directory, 'c') : 0;
 }
 
 static bool poll_job(struct job *job, int timeout, int audio_fd, short *audio_events)
@@ -239,7 +317,7 @@ static bool poll_job(struct job *job, int timeout, int audio_fd, short *audio_ev
         { .fd = audio_fd, .events = POLLIN },
     };
     int ready = interrupted ? 0 : poll(fds, 3, timeout);
-    if (interrupted || is_paused(job->lock))
+    if (interrupted || is_paused(job->lock) || is_stopped(job->stopped))
         job->cancelled = true;
     if (ready < 0 && errno != EINTR && !job->cancelled)
         job->error = "Could not monitor the dictation session.";
@@ -701,7 +779,7 @@ static void dictate(struct job *job)
     free(wav);
 }
 
-static int press(int directory)
+static int press(int directory, const char *stopped)
 {
     int lock = open_session_lock(directory);
     if (lock < 0)
@@ -711,7 +789,7 @@ static int press(int directory)
         close(lock);
         return lock_error == EWOULDBLOCK ? 0 : report("Could not lock the VoxFlow session.");
     }
-    if (is_paused(lock)) {
+    if (is_stopped(stopped) || is_paused(lock)) {
         close(lock);
         return 0;
     }
@@ -729,7 +807,7 @@ static int press(int directory)
         return report("Could not open the VoxFlow control pipe.");
     }
 
-    struct job job = { .commands = commands, .lock = lock };
+    struct job job = { .commands = commands, .lock = lock, .stopped = stopped };
     set_phase(&job, READY);
     dictate(&job);
     hide_indicator(&job);
@@ -745,16 +823,17 @@ static int press(int directory)
 
 int main(int argc, char **argv)
 {
-    const char usage[] = "Usage: voxflow press|release|cancel|pause|resume|status|status-path";
+    const char usage[] = "Usage: voxflow press|release|cancel|stop|pause|resume|status|status-path";
     if (argc == 2 && !strcmp(argv[1], "--help")) {
         puts(usage);
         return 0;
     }
     bool status = argc == 2 && (!strcmp(argv[1], "status") || !strcmp(argv[1], "status-path"));
     bool pause = argc == 2 && !strcmp(argv[1], "pause");
+    bool stop = argc == 2 && !strcmp(argv[1], "stop");
     bool resume = argc == 2 && !strcmp(argv[1], "resume");
     if (argc != 2 || (strcmp(argv[1], "press") && strcmp(argv[1], "release") &&
-                      strcmp(argv[1], "cancel") && !status && !pause && !resume)) {
+                      strcmp(argv[1], "cancel") && !status && !pause && !stop && !resume)) {
         fprintf(stderr, "%s\n", usage);
         return 2;
     }
@@ -770,15 +849,21 @@ int main(int argc, char **argv)
     int directory = runtime_directory(name);
     if (directory < 0)
         return status ? 1 : report("Could not open a private VoxFlow directory in XDG_RUNTIME_DIR.");
+    char *stopped = stopped_path();
     int result;
     if (status)
-        result = session_status(directory, name, !strcmp(argv[1], "status-path"));
-    else if (pause || resume)
-        result = set_paused(directory, pause);
+        result = session_status(directory, name, !strcmp(argv[1], "status-path"), stopped);
+    else if (stop || resume)
+        result = set_stopped(directory, stopped, stop);
+    else if (pause)
+        result = pause_session(directory);
     else if (!strcmp(argv[1], "press"))
-        result = press(directory);
+        result = press(directory, stopped);
+    else if (!strcmp(argv[1], "release") && is_stopped(stopped))
+        result = 0;
     else
         result = send_command(directory, argv[1][0]);
+    free(stopped);
     close(directory);
     return result;
 }

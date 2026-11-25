@@ -13,13 +13,14 @@ BarWidget {
     readonly property string executable: Quickshell.env("HOME") + "/.local/bin/voxflow"
     readonly property string runtimeDir: Quickshell.env("XDG_RUNTIME_DIR").replace(/\/+$/, "")
     readonly property bool busy: phase === "recording" || phase === "transcribing"
+    readonly property bool available: phase !== "unavailable"
+    readonly property bool dictationEnabled: available && phase !== "paused" && phase !== "stopped"
+    property bool opened: false
     property string phase: "unavailable"
     property string lockPath: ""
     property bool refreshPending: false
 
     function refreshStatus() {
-        if (lockPath === "")
-            return
         if (query.running) {
             refreshPending = true
         } else {
@@ -28,8 +29,20 @@ BarWidget {
     }
 
     function completeStatus(next) {
-        phase = next === "ready" || next === "recording" || next === "transcribing" || next === "paused"
+        phase = next === "ready" || next === "recording" || next === "transcribing"
+                || next === "paused" || next === "stopped"
             ? next : "unavailable"
+    }
+
+    function open() {
+        if (lockPath === "" && !locate.running)
+            locate.running = true
+        refreshStatus()
+        opened = true
+    }
+
+    function close() {
+        opened = false
     }
 
     Commons.Translations {
@@ -38,6 +51,7 @@ BarWidget {
     }
 
     Process {
+        id: locate
         command: [root.executable, "status-path"]
         running: true
         stdout: StdioCollector {
@@ -49,12 +63,12 @@ BarWidget {
                 return
             let path = pathOutput.text.trim()
             let prefix = root.runtimeDir + "/"
-            if (path.startsWith(prefix) && /^voxflow-[0-9a-f]{16}\/lock$/.test(path.slice(prefix.length))) {
+            if (path.startsWith(prefix) && /^voxflow-[0-9a-f]{16}\/lock$/.test(path.slice(prefix.length)))
                 root.lockPath = path
-                root.refreshStatus()
-            }
         }
     }
+
+    Component.onCompleted: refreshStatus()
 
     FileView {
         path: root.lockPath
@@ -64,7 +78,7 @@ BarWidget {
             reload()
             root.refreshStatus()
         }
-        onLoadFailed: root.completeStatus("")
+        onLoadFailed: root.refreshStatus()
     }
 
     Process {
@@ -100,19 +114,59 @@ BarWidget {
         id: button
         anchors.fill: parent
         bar: root.bar
-        pressable: root.phase !== "unavailable"
-        dimmed: root.phase === "unavailable" || root.phase === "paused"
+        active: root.opened
+        dimmed: !root.dictationEnabled
         tooltipText: strings.t(root.phase)
         onPressed: function(mouseButton) {
-            if (mouseButton === Qt.LeftButton && !toggle.running) {
-                toggle.command = [root.executable, root.phase === "paused" ? "resume" : "pause"]
-                toggle.running = true
-            }
+            if (mouseButton !== Qt.LeftButton)
+                return
+            if (root.opened)
+                root.close()
+            else
+                root.open()
         }
         iconComponent: Component {
-            Image {
-                source: Qt.resolvedUrl("voxflow.png")
-                fillMode: Image.PreserveAspectFit
+            Row {
+                width: implicitWidth
+                height: implicitHeight
+                spacing: 1.6
+
+                Repeater {
+                    model: [6, 12, 20, 14, 8]
+                    Rectangle {
+                        required property int modelData
+                        width: 2.8
+                        height: modelData
+                        radius: width / 2
+                        anchors.verticalCenter: parent.verticalCenter
+                        color: button.foreground
+                    }
+                }
+            }
+        }
+    }
+
+    KeyboardPanel {
+        id: panel
+        anchorItem: button
+        bar: root.bar
+        owner: root
+        open: root.opened
+        focusTarget: powerSwitch
+        contentWidth: panel.fittedContentWidth(Commons.Style.space(280))
+        contentHeight: panel.fittedContentHeight(powerSwitch.implicitHeight)
+
+        Toggle {
+            id: powerSwitch
+            anchors.fill: parent
+            label: strings.t("dictation")
+            description: strings.t(root.available ? (root.dictationEnabled ? "onHint" : "offHint") : "unavailableHint")
+            checked: root.dictationEnabled
+            enabled: root.available && !toggle.running
+            Keys.onEscapePressed: root.close()
+            onClicked: {
+                toggle.command = [root.executable, root.dictationEnabled ? "stop" : "resume"]
+                toggle.running = true
             }
         }
     }

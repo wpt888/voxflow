@@ -47,6 +47,7 @@ class VoxFlowTest(unittest.TestCase):
         self.env = dict(
             os.environ,
             XDG_RUNTIME_DIR=str(directory),
+            XDG_STATE_HOME=str(directory / "home/.local/state"),
             WAYLAND_DISPLAY="voxflow-test",
             CODEX_HOME=str(self.auth.parent),
             PATH=str(tools) + os.pathsep + os.environ["PATH"],
@@ -266,6 +267,52 @@ class VoxFlowTest(unittest.TestCase):
         self.command("pause")
         self.finish(worker)
         self.assertEqual(self.status(), "paused")
+        self.assertFalse(self.clipboard.exists())
+
+    def test_stop_cancels_a_take_and_stays_off_in_a_new_session(self):
+        worker = self.start(VX_HTTP_DELAY_MS="2000")
+        self.release_after_audio()
+        self.wait_for("upload")
+        self.command("stop")
+        self.finish(worker)
+        self.assertFalse(self.clipboard.exists())
+        self.assertEqual(self.status(), "stopped")
+
+        with tempfile.TemporaryDirectory(dir=self.tmp.name) as runtime:
+            self.env["XDG_RUNTIME_DIR"] = runtime
+            self.trace.unlink()
+            self.assertEqual(self.status(), "stopped")
+            self.command("press")
+            self.command("release")
+            self.assertEqual(self.events(), [])
+            self.command("resume")
+            self.assertEqual(self.status(), "ready")
+            worker = self.start()
+            self.release_after_audio()
+            self.finish(worker)
+            self.assertEqual(self.clipboard.read_text(), EXPECTED_TRANSCRIPT)
+
+    def test_backup_routes_release_to_the_original_app_after_a_switch(self):
+        superwhisper = Path(self.env["XDG_RUNTIME_DIR"]) / "bin/superwhisper"
+        self.executable(superwhisper, '#!/bin/sh\nprintf "superwhisper %s\\n" "$1" >> "$VX_TRACE"\n')
+        router = [sys.executable, ROOT / "scripts/dictation-router", BINARY, superwhisper]
+
+        def route(action):
+            subprocess.run(router + [action], env=self.env, check=True, timeout=5)
+
+        self.command("stop")
+        route("press")
+        self.command("resume")
+        route("release")
+        self.assertEqual(self.events(), ["superwhisper start", "superwhisper stop"])
+
+        route("press")
+        self.wait_for_status("recording")
+        self.command("stop")
+        route("release")
+        self.wait_for("hidden")
+        self.assertEqual(self.events(), ["superwhisper start", "superwhisper stop"]
+                         + RECORD_START + ["hidden"])
         self.assertFalse(self.clipboard.exists())
 
     def test_signal_during_recording(self):

@@ -1,0 +1,61 @@
+#!/usr/bin/env python3
+"""Send each Right Alt hold to the app selected when the key was pressed."""
+
+import fcntl
+import os
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+
+def dispatch(action, voxflow, superwhisper):
+    path = subprocess.check_output([voxflow, "status-path"], text=True).strip()
+    deadline = time.monotonic() + 0.25
+    fd = os.open(Path(path).with_name("right-alt"), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "r+", encoding="ascii") as state:
+        while True:
+            fcntl.flock(state, fcntl.LOCK_EX)
+            state.seek(0)
+            held, _, last = state.read(2).partition(" ")
+            if action != "release" or held in ("v", "s"):
+                break
+            fcntl.flock(state, fcntl.LOCK_UN)
+            if time.monotonic() >= deadline:
+                return 0
+            time.sleep(0.005)
+
+        if action == "press":
+            status = subprocess.check_output([voxflow, "status"], text=True).strip()
+            selected = "s" if status in ("paused", "stopped") else "v"
+            state.seek(0)
+            state.write(selected)
+            state.truncate()
+            if selected == "v":
+                subprocess.Popen([voxflow, "press"], stdout=subprocess.DEVNULL, start_new_session=True)
+            else:
+                subprocess.run([superwhisper, "start"], stdout=subprocess.DEVNULL, timeout=5, check=True)
+            return 0
+
+        selected = held if held in ("v", "s") else last
+        if selected not in ("v", "s"):
+            return 0
+        if action == "release":
+            state.seek(0)
+            state.write(" " + selected)
+            state.truncate()
+        command = "stop" if action == "release" else action
+        return subprocess.run(
+            [voxflow, action] if selected == "v" else [superwhisper, command],
+            stdout=subprocess.DEVNULL, timeout=5,
+        ).returncode
+
+
+if __name__ == "__main__":
+    try:
+        voxflow, superwhisper, action = sys.argv[1:]
+        if action not in ("press", "release", "cancel"):
+            raise ValueError("Expected press, release, or cancel.")
+        sys.exit(dispatch(action, voxflow, superwhisper))
+    except (OSError, subprocess.SubprocessError, ValueError) as error:
+        sys.exit(f"voxflow: Right Alt routing failed. {error}")

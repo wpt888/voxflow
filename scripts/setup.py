@@ -13,6 +13,10 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 MARKER = "BEGIN VOXFLOW KEYBINDINGS"
+SUPERWHISPER_BLOCK = re.compile(
+    r"^-- BEGIN SUPERWHISPER KEYBINDINGS\r?\n(.*?)^-- END SUPERWHISPER KEYBINDINGS(?=\r?$)",
+    re.MULTILINE | re.DOTALL,
+)
 
 
 def read_config(path):
@@ -67,6 +71,35 @@ def binding_block(extension, executable):
     return f"{comment} {MARKER}\n{body}\n{comment} END VOXFLOW KEYBINDINGS\n"
 
 
+def backup_bindings(original, prefix):
+    matches = list(SUPERWHISPER_BLOCK.finditer(original))
+    if len(matches) != 1:
+        raise ValueError("Backup setup needs one marked Superwhisper binding block in bindings.lua.")
+    match = matches[0]
+    body = match[1]
+    program = re.search(r'^([ \t]*)local superwhisper = ("(?:[^"\\]|\\.)+")(?=\r?$)',
+                        body, re.MULTILINE)
+    if not program or any('superwhisper .. " ' + action + '"' not in body
+                          for action in ("start", "stop", "cancel")):
+        raise ValueError("Backup setup could not recognize the Superwhisper binding commands.")
+
+    superwhisper = Path(json.loads(program[2]))
+    if not superwhisper.is_absolute() or not os.access(superwhisper, os.X_OK):
+        raise ValueError(f"Could not run Superwhisper at {superwhisper}.")
+
+    command = shlex.join([str(prefix / "libexec/voxflow-dictation-router"),
+                          str(prefix / "bin/voxflow"), str(superwhisper)])
+    body = body[:program.start()] + f"{program[1]}local voxflow = " + json.dumps(
+        command, ensure_ascii=False,
+    ) + body[program.end():]
+    for before, after in (("start", "press"), ("stop", "release"), ("cancel", "cancel")):
+        body = body.replace(f'superwhisper .. " {before}"', f'voxflow .. " {after}"')
+    body = body.replace("Superwhisper dictation", "dictation")
+    newline = "\r\n" if "\r\n" in original else "\n"
+    return (original[:match.start()] + f"-- {MARKER}{newline}" + body
+            + "-- END VOXFLOW KEYBINDINGS" + original[match.end():])
+
+
 def write_temporary(path, text, label, mode):
     with tempfile.NamedTemporaryFile(
         mode="w", encoding="utf-8", newline="", dir=path.parent,
@@ -119,7 +152,7 @@ def config_errors():
     return None
 
 
-def setup(prefix, destdir):
+def setup(prefix, destdir, backup_mode=False):
     if destdir:
         raise ValueError("For a staged install use make install with DESTDIR.")
     missing = [command for command in ("pw-record", "wl-copy", "stdbuf") if not shutil.which(command)]
@@ -132,13 +165,24 @@ def setup(prefix, destdir):
     errors_before = config_errors()
 
     backup = None
-    if existing:
+    updated = original
+    if backup_mode:
+        if "voxflow-dictation-router" in original:
+            print(f"VoxFlow backup bindings are already configured in {target}.")
+        elif target.suffix != ".lua" or existing:
+            raise ValueError("Backup setup needs Superwhisper's Lua bindings without a separate VoxFlow binding.")
+        else:
+            updated = backup_bindings(original, prefix)
+            subprocess.run([prefix / "bin/voxflow", "stop"], check=True, timeout=5)
+    elif existing:
         print(f"VoxFlow keybindings are already configured in {existing}.")
     else:
         newline = "\r\n" if "\r\n" in original else "\n"
         block = binding_block(target.suffix, prefix / "bin/voxflow").replace("\n", newline)
         padding = newline if original.endswith(newline) else 2 * newline
         updated = original + (padding if original else "") + block
+
+    if updated != original:
         backup = write_temporary(target, original, "voxflow-backup", 0o600)
         replace_config(target, original, updated)
         print(f"VoxFlow keybindings saved in {target}.")
@@ -157,14 +201,18 @@ def setup(prefix, destdir):
         raise ValueError(f"Hyprland reported a config error.\n{errors_after}")
     elif errors_after:
         print("Hyprland still reports existing config errors. Check hyprctl configerrors.")
+    elif backup_mode:
+        print("Hyprland reloaded. The VoxFlow tray switch selects which app uses Right Alt.")
     else:
         print("Hyprland reloaded. Hold Right Alt to dictate and release it to transcribe.")
 
 
 if __name__ == "__main__":
     try:
-        prefix_arg, destdir_arg = sys.argv[1:]
-        setup(Path(prefix_arg).expanduser().resolve(), destdir_arg)
-    except (ValueError, OSError) as error:
+        prefix_arg, destdir_arg, *options = sys.argv[1:]
+        if options not in ([], ["--superwhisper-backup"]):
+            raise ValueError("Unknown setup option.")
+        setup(Path(prefix_arg).expanduser().resolve(), destdir_arg, bool(options))
+    except (ValueError, OSError, subprocess.SubprocessError) as error:
         print(f"voxflow setup: {error}", file=sys.stderr)
         sys.exit(1)

@@ -47,19 +47,34 @@ after the initial `make setup`.
 make bar-setup
 ```
 
-The VoxFlow icon appears beside the system tray. Hover over it to see whether
-VoxFlow is ready for Right Alt, recording, or transcribing and inserting text.
-A red dot indicates recording and an amber dot indicates transcription or
-insertion. The bar displays the widget between takes and after login.
+The VoxFlow waveform appears beside the system tray. Click it to open the
+**VoxFlow dictation** switch. Turning VoxFlow off cancels an active take and
+keeps dictation off across logins and reboots. When on, a red dot on the icon
+indicates recording and an amber dot indicates transcription or insertion.
 
-Click the icon to pause VoxFlow for the current login. This cancels an active
-take and disables Right Alt dictation until you click again. The equivalent
-commands are `voxflow pause` and `voxflow resume`. Use `voxflow cancel` to end
+The equivalent commands are `voxflow stop` and `voxflow resume`. Use
+`voxflow pause` to switch off for the current login or `voxflow cancel` to end
 just the current take.
 
-The widget runs inside the Omarchy shell. The `voxflow` worker appears in
-process monitors such as btop only during a take. Use
+The widget runs inside the Omarchy shell. Run `btop --filter voxflow` to
+find the worker while a take is active. Ending the worker cancels that
+take. Use the tray switch to keep dictation off, or use
 `omarchy plugin disable local.voxflow` to remove it from the bar.
+
+### Use VoxFlow as a backup for Superwhisper
+
+If your Omarchy `bindings.lua` has a `BEGIN SUPERWHISPER KEYBINDINGS` block
+for Right Alt, run this inside your desktop session.
+
+```sh
+make backup-setup
+```
+
+Setup installs the tray switch, backs up your binding file, and leaves VoxFlow
+off on the first run. Right Alt goes to Superwhisper while VoxFlow is **Off**
+and to VoxFlow while it’s **On**. Each key release goes to the app that
+received the press, even if you change the switch while holding Right Alt.
+For a standalone VoxFlow setup, use `make setup` and `make bar-setup`.
 
 ## Codex sign-in
 

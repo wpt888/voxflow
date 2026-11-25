@@ -1,7 +1,12 @@
 {
-  "ready": "VoxFlow · Ready — hold Right Alt or click to pause",
-  "recording": "VoxFlow · Recording — click to pause",
-  "transcribing": "VoxFlow · Transcribing — click to pause",
-  "paused": "VoxFlow · Paused — click to resume",
-  "unavailable": "VoxFlow · Unavailable"
+  "ready": "VoxFlow · On",
+  "recording": "VoxFlow · Recording",
+  "transcribing": "VoxFlow · Transcribing",
+  "paused": "VoxFlow · Off",
+  "stopped": "VoxFlow · Off",
+  "unavailable": "VoxFlow · Unavailable",
+  "dictation": "VoxFlow dictation",
+  "onHint": "On · Hold Right Alt to dictate",
+  "offHint": "Off · Flip the switch to use VoxFlow",
+  "unavailableHint": "VoxFlow is unavailable"
 }
