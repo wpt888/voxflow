@@ -1,0 +1,7 @@
+{
+  "ready": "VoxFlow · Ready — hold Right Alt or click to pause",
+  "recording": "VoxFlow · Recording — click to pause",
+  "transcribing": "VoxFlow · Transcribing — click to pause",
+  "paused": "VoxFlow · Paused — click to resume",
+  "unavailable": "VoxFlow · Unavailable"
+}

@@ -15,7 +15,7 @@ enum {
     WIDTH = 226, HEIGHT = 60, SCALE = 2,
     PIXEL_WIDTH = WIDTH * SCALE, PIXEL_HEIGHT = HEIGHT * SCALE,
     STRIDE = PIXEL_WIDTH * 4, IMAGE_BYTES = STRIDE * PIXEL_HEIGHT,
-    PROCESSING_BUFFER = 2, BUFFER_COUNT = 3, SHM_BYTES = BUFFER_COUNT * IMAGE_BYTES,
+    BUFFER_COUNT = 2, SHM_BYTES = BUFFER_COUNT * IMAGE_BYTES,
 };
 static const double pi = 3.14159265358979323846;
 
@@ -112,7 +112,7 @@ static void rounded_rect(cairo_t *draw, double x, double y, double w, double h, 
     cairo_close_path(draw);
 }
 
-static bool draw_badge(void *pixels, const float *levels)
+static bool draw_badge(void *pixels, const float levels[WAVEFORM_BARS])
 {
     memset(pixels, 0, IMAGE_BYTES);
     cairo_surface_t *surface = cairo_image_surface_create_for_data(
@@ -122,35 +122,20 @@ static bool draw_badge(void *pixels, const float *levels)
 
     rounded_rect(draw, 1, 1, WIDTH - 2, HEIGHT - 2, 12);
     cairo_set_source_rgba(draw, 0.07, 0.08, 0.10, 0.96);
-    cairo_fill_preserve(draw);
-    cairo_set_source_rgba(draw, 1, 1, 1, 0.27);
-    cairo_set_line_width(draw, 1);
-    cairo_stroke(draw);
+    cairo_fill(draw);
     cairo_set_line_cap(draw, CAIRO_LINE_CAP_ROUND);
-    cairo_set_line_join(draw, CAIRO_LINE_JOIN_ROUND);
     cairo_set_line_width(draw, 2.25);
 
     double center_x = WIDTH / 2.0;
     double center_y = HEIGHT / 2.0;
-    if (levels) {
-        cairo_set_source_rgb(draw, 0.94, 0.95, 0.97);
-        cairo_set_line_width(draw, 2.25);
-        for (size_t bar = 0; bar < WAVEFORM_BARS; bar++) {
-            double x = center_x + 6 * ((double)bar - (WAVEFORM_BARS - 1) / 2.0);
-            double half_height = 0.4 + 22 * sqrt(levels[bar]);
-            cairo_move_to(draw, x, center_y - half_height);
-            cairo_line_to(draw, x, center_y + half_height);
-        }
-        cairo_stroke(draw);
-    } else {
-        cairo_set_source_rgb(draw, 1, 0.75, 0.32);
-        cairo_arc(draw, center_x, center_y, 11, 0, 2 * pi);
-        cairo_stroke(draw);
-        cairo_move_to(draw, center_x, center_y - 6);
-        cairo_line_to(draw, center_x, center_y);
-        cairo_line_to(draw, center_x + 4, center_y + 2.5);
-        cairo_stroke(draw);
+    cairo_set_source_rgb(draw, 0.94, 0.95, 0.97);
+    for (size_t bar = 0; bar < WAVEFORM_BARS; bar++) {
+        double x = center_x + 6 * ((double)bar - (WAVEFORM_BARS - 1) / 2.0);
+        double half_height = 0.4 + 22 * sqrt(levels[bar]);
+        cairo_move_to(draw, x, center_y - half_height);
+        cairo_line_to(draw, x, center_y + half_height);
     }
+    cairo_stroke(draw);
     bool success = cairo_status(draw) == CAIRO_STATUS_SUCCESS;
     cairo_destroy(draw);
     cairo_surface_destroy(surface);
@@ -195,7 +180,7 @@ static bool make_buffers(struct indicator *indicator)
         }
     }
     wl_shm_pool_destroy(pool);
-    return ready && draw_badge(indicator->pixels + PROCESSING_BUFFER * IMAGE_BYTES, NULL);
+    return ready;
 }
 
 struct indicator *indicator_open(void)
@@ -267,21 +252,13 @@ static bool commit_buffer(struct indicator *indicator, struct indicator_buffer *
 bool indicator_waveform(struct indicator *indicator, const float levels[WAVEFORM_BARS])
 {
     /* Skip a frame if the compositor is still reading both recording buffers. */
-    for (int i = 0; i < PROCESSING_BUFFER; i++) {
+    for (int i = 0; i < BUFFER_COUNT; i++) {
         struct indicator_buffer *buffer = &indicator->buffers[i];
         if (!buffer->busy)
             return draw_badge(indicator->pixels + i * IMAGE_BYTES, levels) &&
                    commit_buffer(indicator, buffer);
     }
     return true;
-}
-
-bool indicator_show(struct indicator *indicator, enum indicator_state state)
-{
-    static const float silence[WAVEFORM_BARS] = {0};
-    if (state == RECORDING)
-        return indicator_waveform(indicator, silence);
-    return commit_buffer(indicator, &indicator->buffers[PROCESSING_BUFFER]);
 }
 
 int indicator_fd(struct indicator *indicator)

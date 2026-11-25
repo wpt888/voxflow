@@ -28,19 +28,16 @@ struct indicator *indicator_open(void)
     return calloc(1, sizeof(struct indicator));
 }
 
-bool indicator_show(struct indicator *indicator, enum indicator_state state)
-{
-    indicator->visible = true;
-    trace(state == RECORDING ? "recording" : "processing");
-    return true;
-}
-
 bool indicator_waveform(struct indicator *indicator, const float levels[WAVEFORM_BARS])
 {
+    if (!indicator->visible) {
+        indicator->visible = true;
+        trace("recording");
+        return true;
+    }
     if (!getenv("VX_TEST_WAVEFORM"))
         return true;
 
-    assert(indicator->visible);
     float newest = levels[WAVEFORM_BARS - 1];
     assert(newest >= 0 && newest <= 1);
     if (newest == 0 && !indicator->saw_silence) {

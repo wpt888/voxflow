@@ -81,6 +81,20 @@ class VoxFlowTest(unittest.TestCase):
     def command(self, command):
         subprocess.run([BINARY, command], env=self.env, check=True, timeout=5)
 
+    def status(self):
+        return subprocess.check_output(
+            [BINARY, "status"], env=self.env, text=True, timeout=2
+        ).strip()
+
+    def wait_for_status(self, expected):
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            current = self.status()
+            if current == expected:
+                return
+            time.sleep(0.01)
+        self.fail(f"Expected status {expected!r}. Last status was {current!r}.")
+
     def start(self, **options):
         worker = subprocess.Popen(
             [BINARY, "press"], env=self.env | options,
@@ -125,10 +139,10 @@ class VoxFlowTest(unittest.TestCase):
         snapshot = (self.auth.read_bytes(), self.auth.stat().st_mtime_ns)
         self.release_after_audio()
         self.wait_for("upload")
-        self.assertEqual(self.events(), RECORD_START + ["processing", "upload"])
+        self.assertEqual(self.events(), RECORD_START + ["hidden", "upload"])
         self.assertFalse(self.clipboard.exists())
         self.finish(worker)
-        self.assertEqual(self.events(), RECORD_START + ["processing", "upload", "hidden"])
+        self.assertEqual(self.events(), RECORD_START + ["hidden", "upload"])
         self.assertEqual(self.clipboard.read_text(), EXPECTED_TRANSCRIPT)
         self.assertEqual((self.auth.read_bytes(), self.auth.stat().st_mtime_ns), snapshot)
 
@@ -176,7 +190,82 @@ class VoxFlowTest(unittest.TestCase):
         self.wait_for("upload")
         self.command("cancel")
         self.finish(worker)
-        self.assertEqual(self.events(), RECORD_START + ["processing", "upload", "hidden"])
+        self.assertEqual(self.events(), RECORD_START + ["hidden", "upload"])
+        self.assertFalse(self.clipboard.exists())
+
+    def test_bar_status_follows_a_take(self):
+        path = Path(subprocess.check_output(
+            [BINARY, "status-path"], env=self.env, text=True, timeout=2
+        ).strip())
+        self.assertEqual(path.parent.parent, Path(self.env["XDG_RUNTIME_DIR"]))
+        self.assertEqual(path.name, "lock")
+        inode = path.stat().st_ino
+        self.assertEqual(self.status(), "ready")
+
+        worker = self.start(VX_RECORDER_DELAY_MS="200", VX_HTTP_DELAY_MS="400",
+                            VX_CLIPBOARD_DELAY="0.3")
+        self.wait_for("indicator ready")
+        self.assertEqual(self.status(), "ready")
+        self.wait_for_status("recording")
+        self.release_after_audio()
+        self.wait_for("upload")
+        self.assertEqual(self.status(), "transcribing")
+        self.wait_for("copy started")
+        self.assertEqual(self.status(), "transcribing")
+        self.finish(worker)
+        self.assertEqual(self.status(), "ready")
+        self.assertEqual(path.stat().st_ino, inode)
+
+    def test_bar_status_clears_after_cancel_or_cloud_failure(self):
+        worker = self.start()
+        self.wait_for_status("recording")
+        self.command("cancel")
+        self.finish(worker)
+        self.assertEqual(self.status(), "ready")
+        self.trace.unlink()
+
+        worker = self.start(VX_HTTP_STATUS="500", VX_HTTP_DELAY_MS="300")
+        self.release_after_audio()
+        self.wait_for("upload")
+        self.assertEqual(self.status(), "transcribing")
+        self.finish(worker, "service failed")
+        self.assertEqual(self.status(), "ready")
+
+    def test_bar_status_recovers_when_a_worker_is_killed(self):
+        worker = self.start()
+        self.wait_for_status("recording")
+        worker.kill()
+        worker.communicate(timeout=5)
+        self.assertEqual(self.status(), "ready")
+
+    def test_pause_stops_capture_and_resume_allows_a_new_take(self):
+        worker = self.start()
+        self.wait_for_status("recording")
+        self.command("pause")
+        self.finish(worker)
+        self.assertEqual(self.status(), "paused")
+        self.assertEqual(self.events(), RECORD_START + ["hidden"])
+        self.assertFalse(self.clipboard.exists())
+
+        self.trace.unlink()
+        self.command("press")
+        self.assertEqual(self.events(), [])
+        self.assertEqual(self.status(), "paused")
+
+        self.command("resume")
+        self.assertEqual(self.status(), "ready")
+        worker = self.start()
+        self.release_after_audio()
+        self.finish(worker)
+        self.assertEqual(self.clipboard.read_text(), EXPECTED_TRANSCRIPT)
+
+    def test_pause_during_transcription_discards_the_result(self):
+        worker = self.start(VX_HTTP_DELAY_MS="2000")
+        self.release_after_audio()
+        self.wait_for("upload")
+        self.command("pause")
+        self.finish(worker)
+        self.assertEqual(self.status(), "paused")
         self.assertFalse(self.clipboard.exists())
 
     def test_signal_during_recording(self):
@@ -196,7 +285,7 @@ class VoxFlowTest(unittest.TestCase):
         worker = self.start(VX_RECORDER_STOP_STATUS="1")
         self.release_after_audio()
         self.finish(worker)
-        self.assertEqual(self.events(), RECORD_START + ["processing", "upload", "hidden"])
+        self.assertEqual(self.events(), RECORD_START + ["hidden", "upload"])
         self.assertEqual(self.clipboard.read_text(), EXPECTED_TRANSCRIPT)
 
     def test_unexpected_exit_during_capture_discards_audio(self):
@@ -209,7 +298,7 @@ class VoxFlowTest(unittest.TestCase):
         worker = self.start(VX_RECORDER_STOP_STATUS="2")
         self.release_after_audio()
         self.finish(worker, "pw-record failed before it finished writing audio")
-        self.assertEqual(self.events(), RECORD_START + ["processing", "hidden"])
+        self.assertEqual(self.events(), RECORD_START + ["hidden"])
         self.assertFalse(self.clipboard.exists())
 
     def test_waveform_reacts_to_audio_samples(self):
@@ -229,7 +318,7 @@ class VoxFlowTest(unittest.TestCase):
                 worker = self.start()
                 self.release_after_audio()
                 self.finish(worker, "Run codex login")
-                self.assertEqual(self.events(), RECORD_START + ["processing", "hidden"])
+                self.assertEqual(self.events(), RECORD_START + ["hidden"])
                 self.assertFalse(self.clipboard.exists())
 
     def test_cloud_failures_leave_existing_clipboard_intact(self):
@@ -251,23 +340,26 @@ class VoxFlowTest(unittest.TestCase):
                 worker = self.start(**options)
                 self.release_after_audio()
                 self.finish(worker, error)
-                self.assertEqual(self.events(), RECORD_START + ["processing", "upload", "hidden"])
+                self.assertEqual(self.events(), RECORD_START + ["hidden", "upload"])
                 self.assertEqual(self.clipboard.read_text(), "original clipboard")
 
     def test_clipboard_failure_hides_indicator(self):
         worker = self.start(VX_CLIPBOARD_FAIL="1")
         self.release_after_audio()
         self.finish(worker, "Could not copy")
-        self.assertEqual(self.events(), RECORD_START + ["processing", "upload", "hidden"])
+        self.assertEqual(self.events(), RECORD_START + ["hidden", "upload"])
 
-    def test_processing_indicator_stays_visible_until_clipboard_is_ready(self):
-        worker = self.start(VX_CLIPBOARD_DELAY="0.3")
+    def test_waveform_disappears_on_release_before_transcription_and_copy(self):
+        worker = self.start(VX_RECORDER_STOP_DELAY_MS="300", VX_CLIPBOARD_DELAY="0.3")
         self.release_after_audio()
+        self.wait_for("hidden")
+        self.assertEqual(self.events(), RECORD_START + ["hidden"])
+        self.assertIsNone(worker.poll())
         self.wait_for("copy started")
-        self.assertEqual(self.events(), RECORD_START + ["processing", "upload", "copy started"])
+        self.assertEqual(self.events(), RECORD_START + ["hidden", "upload", "copy started"])
         self.assertFalse(self.clipboard.exists())
         self.finish(worker)
-        self.assertEqual(self.events()[-1], "hidden")
+        self.assertEqual(self.events().count("hidden"), 1)
         self.assertEqual(self.clipboard.read_text(), EXPECTED_TRANSCRIPT)
 
     @unittest.skipUnless(shutil.which("lua"), "Lua is needed to run the Hyprland expression")
@@ -275,7 +367,9 @@ class VoxFlowTest(unittest.TestCase):
         worker = self.start(VX_TEST_PASTE="1", VX_WINDOW_CLASS="editor")
         self.release_after_audio()
         self.finish(worker)
-        self.assertEqual(self.events()[-3:], ["paste CTRL down", "paste CTRL up", "hidden"])
+        self.assertEqual(
+            self.events(), RECORD_START + ["hidden", "upload", "paste CTRL down", "paste CTRL up"]
+        )
         self.assertEqual(self.clipboard.read_text(), EXPECTED_TRANSCRIPT)
 
     @unittest.skipUnless(shutil.which("lua"), "Lua is needed to run the Hyprland expression")
@@ -284,7 +378,8 @@ class VoxFlowTest(unittest.TestCase):
         self.release_after_audio()
         self.finish(worker)
         self.assertEqual(
-            self.events()[-3:], ["paste CTRL SHIFT down", "paste CTRL SHIFT up", "hidden"]
+            self.events(),
+            RECORD_START + ["hidden", "upload", "paste CTRL SHIFT down", "paste CTRL SHIFT up"],
         )
 
     @unittest.skipUnless(shutil.which("lua"), "Lua is needed to run the Hyprland expression")
@@ -296,7 +391,7 @@ class VoxFlowTest(unittest.TestCase):
                 worker = self.start(VX_TEST_PASTE="1", VX_WINDOW_CLASS="editor", **options)
                 self.release_after_audio()
                 self.finish(worker)
-                self.assertEqual(self.events(), RECORD_START + ["processing", "upload", "hidden"])
+                self.assertEqual(self.events(), RECORD_START + ["hidden", "upload"])
                 self.assertEqual(self.clipboard.read_text(), EXPECTED_TRANSCRIPT)
 
 def rss_kib(pid):

@@ -32,6 +32,7 @@ int main(void)
     int16_t samples[320] = {0}; /* 20 ms of mono PCM. */
     const char *exit_after = getenv("VX_RECORDER_EXIT_AFTER_CHUNKS");
     const char *stop_status = getenv("VX_RECORDER_STOP_STATUS");
+    const char *stop_delay = getenv("VX_RECORDER_STOP_DELAY_MS");
     int chunks = 0;
     while (!stopped) {
         if (chunks == 4 && getenv("VX_TEST_WAVEFORM"))
@@ -43,5 +44,7 @@ int main(void)
             return EXIT_FAILURE;
         usleep(20000);
     }
+    if (stop_delay)
+        usleep((useconds_t)atoi(stop_delay) * 1000);
     return stop_status ? atoi(stop_status) : 0;
 }

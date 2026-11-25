@@ -32,14 +32,19 @@ enum {
     HYPRCTL_TIMEOUT_MS = 500,
     WINDOW_ID_BYTES = 24,
     LATE_PRESS_MS = 250,
+    SESSION_NAME_BYTES = 32,
 };
+
+enum session_phase { READY = 'R', RECORDING = 'M', TRANSCRIBING = 'T' };
+enum { PHASE_OFFSET = 0, PAUSE_OFFSET = 1 };
 
 struct job {
     int commands;
+    int lock;
     struct indicator *indicator;
+    enum session_phase phase;
     bool released;
     bool cancelled;
-    bool processing;
     const char *error;
 };
 
@@ -82,7 +87,7 @@ static int report(const char *error)
     return 1;
 }
 
-static int runtime_directory(void)
+static int runtime_directory(char name[SESSION_NAME_BYTES])
 {
     const char *runtime = getenv("XDG_RUNTIME_DIR");
     if (!runtime || runtime[0] != '/')
@@ -94,8 +99,7 @@ static int runtime_directory(void)
     uint64_t hash = UINT64_C(14695981039346656037);
     for (; *display; display++)
         hash = (hash ^ (unsigned char)*display) * UINT64_C(1099511628211);
-    char name[32];
-    snprintf(name, sizeof name, "voxflow-%016llx", (unsigned long long)hash);
+    snprintf(name, SESSION_NAME_BYTES, "voxflow-%016llx", (unsigned long long)hash);
 
     int parent = open(runtime, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (parent < 0)
@@ -111,6 +115,82 @@ static int runtime_directory(void)
         directory = -1;
     }
     return directory;
+}
+
+static int open_session_lock(int directory)
+{
+    int lock = openat(directory, "lock", O_CREAT | O_RDWR | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC,
+                      0600);
+    struct stat info;
+    if (lock >= 0 && (fstat(lock, &info) < 0 || !S_ISREG(info.st_mode) ||
+                      info.st_uid != geteuid())) {
+        close(lock);
+        return -1;
+    }
+    return lock;
+}
+
+static bool write_lock_byte(int lock, off_t offset, char value)
+{
+    /* Keep the inode in place so the bar can watch it across takes. */
+    ssize_t written;
+    do {
+        written = pwrite(lock, &value, 1, offset);
+    } while (written < 0 && errno == EINTR);
+    return written == 1;
+}
+
+static bool is_paused(int lock)
+{
+    char value;
+    return pread(lock, &value, 1, PAUSE_OFFSET) == 1 && value == 'P';
+}
+
+static void set_phase(struct job *job, enum session_phase phase)
+{
+    if (job->phase == phase)
+        return;
+    job->phase = phase;
+    if (!write_lock_byte(job->lock, PHASE_OFFSET, (char)phase))
+        syslog(LOG_WARNING, "Could not update VoxFlow's bar status.");
+}
+
+static int session_status(int directory, const char *name, bool print_path)
+{
+    int lock = open_session_lock(directory);
+    if (lock < 0)
+        return 1;
+    if (print_path) {
+        close(lock);
+        const char *runtime = getenv("XDG_RUNTIME_DIR");
+        size_t length = strlen(runtime);
+        while (length > 0 && runtime[length - 1] == '/')
+            length--;
+        printf("%.*s/%s/lock\n", (int)length, runtime, name);
+        return 0;
+    }
+
+    if (is_paused(lock)) {
+        close(lock);
+        puts("paused");
+        return 0;
+    }
+
+    char phase = READY;
+    if (flock(lock, LOCK_SH | LOCK_NB) < 0) {
+        if (errno != EWOULDBLOCK || pread(lock, &phase, 1, PHASE_OFFSET) < 0) {
+            close(lock);
+            return 1;
+        }
+    }
+    close(lock);
+    switch (phase) {
+    case '\0':
+    case READY: puts("ready"); return 0;
+    case RECORDING: puts("recording"); return 0;
+    case TRANSCRIBING: puts("transcribing"); return 0;
+    default: return 1;
+    }
 }
 
 static int send_command(int directory, char command)
@@ -139,6 +219,18 @@ static int send_command(int directory, char command)
     return report("Could not deliver the VoxFlow control command.");
 }
 
+static int set_paused(int directory, bool paused)
+{
+    int lock = open_session_lock(directory);
+    if (lock < 0)
+        return report("Could not open the VoxFlow session lock.");
+    bool saved = write_lock_byte(lock, PAUSE_OFFSET, paused ? 'P' : 'E');
+    close(lock);
+    if (!saved)
+        return report("Could not update VoxFlow's paused state.");
+    return paused ? send_command(directory, 'c') : 0;
+}
+
 static bool poll_job(struct job *job, int timeout, int audio_fd, short *audio_events)
 {
     struct pollfd fds[] = {
@@ -147,7 +239,7 @@ static bool poll_job(struct job *job, int timeout, int audio_fd, short *audio_ev
         { .fd = audio_fd, .events = POLLIN },
     };
     int ready = interrupted ? 0 : poll(fds, 3, timeout);
-    if (interrupted)
+    if (interrupted || is_paused(job->lock))
         job->cancelled = true;
     if (ready < 0 && errno != EINTR && !job->cancelled)
         job->error = "Could not monitor the dictation session.";
@@ -260,16 +352,6 @@ static void hide_indicator(struct job *job)
     job->indicator = NULL;
 }
 
-static bool show_processing(struct job *job)
-{
-    if (!job->processing && !indicator_show(job->indicator, PROCESSING)) {
-        job->error = "Could not show the Wayland processing indicator.";
-        return false;
-    }
-    job->processing = true;
-    return true;
-}
-
 static bool update_waveform(struct indicator *indicator, float levels[WAVEFORM_BARS],
                             const unsigned char *pcm, size_t length, size_t *analyzed)
 {
@@ -325,8 +407,8 @@ static size_t capture(struct job *job, unsigned char *pcm)
             }
             stopping = true;
             max_end = activity_end = monotonic_ms() + STOP_TIMEOUT_MS;
-            if (length >= 2 && !show_processing(job))
-                break;
+            hide_indicator(job);
+            set_phase(job, length >= MIN_PCM_BYTES ? TRANSCRIBING : READY);
         }
 
         int64_t now = monotonic_ms();
@@ -354,10 +436,11 @@ static size_t capture(struct job *job, unsigned char *pcm)
         } else if (bytes > 0) {
             if (!stopping) {
                 if (length < 2 && length + (size_t)bytes >= 2) {
-                    if (!indicator_show(job->indicator, RECORDING)) {
+                    if (!indicator_waveform(job->indicator, levels)) {
                         job->error = "Could not show the Wayland recording indicator.";
                         break;
                     }
+                    set_phase(job, RECORDING);
                     syslog(LOG_INFO, "Microphone capture started.");
                 }
                 activity_end = now + STALL_TIMEOUT_MS;
@@ -395,7 +478,7 @@ static size_t capture(struct job *job, unsigned char *pcm)
         return 0;
     }
 
-    /* A release during startup can drain audio without ever showing RECORDING. */
+    /* A release during startup can drain audio before the waveform appears. */
     length -= length % 2;
     return length;
 }
@@ -588,7 +671,8 @@ static void dictate(struct job *job)
     size_t length = capture(job, wav + WAV_HEADER_BYTES);
     if (continue_job(job) && length < MIN_PCM_BYTES)
         syslog(LOG_INFO, "Recording was too short to transcribe.");
-    else if (!job->error && !job->cancelled && show_processing(job)) {
+    else if (!job->error && !job->cancelled) {
+        set_phase(job, TRANSCRIBING);
 #if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
         for (size_t i = WAV_HEADER_BYTES; i < WAV_HEADER_BYTES + length; i += 2) {
             unsigned char first = wav[i];
@@ -619,13 +703,17 @@ static void dictate(struct job *job)
 
 static int press(int directory)
 {
-    int lock = openat(directory, "lock", O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC, 0600);
+    int lock = open_session_lock(directory);
     if (lock < 0)
         return report("Could not open the VoxFlow session lock.");
     if (flock(lock, LOCK_EX | LOCK_NB) < 0) {
         int lock_error = errno;
         close(lock);
         return lock_error == EWOULDBLOCK ? 0 : report("Could not lock the VoxFlow session.");
+    }
+    if (is_paused(lock)) {
+        close(lock);
+        return 0;
     }
 
     if (mkfifoat(directory, "control", 0600) < 0 && errno != EEXIST) {
@@ -641,9 +729,11 @@ static int press(int directory)
         return report("Could not open the VoxFlow control pipe.");
     }
 
-    struct job job = { .commands = commands };
+    struct job job = { .commands = commands, .lock = lock };
+    set_phase(&job, READY);
     dictate(&job);
     hide_indicator(&job);
+    set_phase(&job, READY);
     close(commands);
     close(lock);
     if (job.cancelled || interrupted) {
@@ -655,13 +745,17 @@ static int press(int directory)
 
 int main(int argc, char **argv)
 {
+    const char usage[] = "Usage: voxflow press|release|cancel|pause|resume|status|status-path";
     if (argc == 2 && !strcmp(argv[1], "--help")) {
-        puts("Usage: voxflow press|release|cancel");
+        puts(usage);
         return 0;
     }
+    bool status = argc == 2 && (!strcmp(argv[1], "status") || !strcmp(argv[1], "status-path"));
+    bool pause = argc == 2 && !strcmp(argv[1], "pause");
+    bool resume = argc == 2 && !strcmp(argv[1], "resume");
     if (argc != 2 || (strcmp(argv[1], "press") && strcmp(argv[1], "release") &&
-                      strcmp(argv[1], "cancel"))) {
-        fputs("Usage: voxflow press|release|cancel\n", stderr);
+                      strcmp(argv[1], "cancel") && !status && !pause && !resume)) {
+        fprintf(stderr, "%s\n", usage);
         return 2;
     }
 
@@ -672,11 +766,19 @@ int main(int argc, char **argv)
     signal(SIGPIPE, SIG_IGN);
     openlog("voxflow", LOG_PID, LOG_USER);
 
-    int directory = runtime_directory();
+    char name[SESSION_NAME_BYTES];
+    int directory = runtime_directory(name);
     if (directory < 0)
-        return report("Could not open a private VoxFlow directory in XDG_RUNTIME_DIR.");
-    int result = !strcmp(argv[1], "press") ? press(directory) :
-                 send_command(directory, argv[1][0]);
+        return status ? 1 : report("Could not open a private VoxFlow directory in XDG_RUNTIME_DIR.");
+    int result;
+    if (status)
+        result = session_status(directory, name, !strcmp(argv[1], "status-path"));
+    else if (pause || resume)
+        result = set_paused(directory, pause);
+    else if (!strcmp(argv[1], "press"))
+        result = press(directory);
+    else
+        result = send_command(directory, argv[1][0]);
     close(directory);
     return result;
 }

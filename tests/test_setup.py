@@ -1,8 +1,10 @@
 import os
 from pathlib import Path
+import runpy
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 MARKER = "BEGIN VOXFLOW KEYBINDINGS"
@@ -126,6 +128,28 @@ class SetupTest(unittest.TestCase):
         )
         result = self.setup_voxflow()
         self.assertIn("Hyprland reloaded. Hold Right Alt", result.stdout)
+
+    def test_omarchy_bar_widget_install_and_upgrade(self):
+        install_bar = runpy.run_path(str(ROOT / "scripts/setup_bar.py"))["install_bar"]
+        plugins = self.directory / "plugins"
+        destination = plugins / "local.voxflow"
+        with mock.patch("shutil.which", return_value="/usr/bin/omarchy"), \
+             mock.patch("subprocess.run") as run:
+            install_bar(self.prefix, plugins)
+            self.assertIn(str(self.prefix / "bin/voxflow"),
+                          (destination / "BarWidget.qml").read_text())
+            self.assertEqual((destination / "voxflow.png").read_bytes(),
+                             (ROOT / "assets/voxflow.png").read_bytes())
+            self.assertTrue((destination / "i18n/en.json").is_file())
+            marker = destination / "user-file"
+            marker.write_text("keep")
+
+            install_bar(self.prefix, plugins)
+            self.assertEqual(marker.read_text(), "keep")
+            self.assertEqual(run.call_count, 6)
+            self.assertEqual(run.call_args.args[0],
+                             ["omarchy", "bar", "put", "local.voxflow", "--section", "right",
+                              "--after", "omarchy.tray"])
 
 
 if __name__ == "__main__":

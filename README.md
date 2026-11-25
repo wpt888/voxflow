@@ -3,9 +3,9 @@
 <img src="assets/voxflow.png" alt="VoxFlow icon" width="112" align="right">
 
 Hold **Right Alt** to dictate in Hyprland. A tall, live waveform appears at
-the bottom center when microphone samples start arriving. Release the key to
-send the recording to ChatGPT. The waveform changes to an amber clock while
-VoxFlow transcribes it. VoxFlow copies the result to the Wayland clipboard
+the bottom center when microphone samples start arriving. The waveform
+disappears when you release the key, and VoxFlow sends the recording to
+ChatGPT. VoxFlow copies the result to the Wayland clipboard
 and automatically pastes into the window that was focused on release if it
 still has focus.
 
@@ -37,6 +37,29 @@ runs. Terminal runs also print the error.
 
 Use `make install` to install just the binary and app icon, or `make test` to
 run the automated tests.
+
+### Omarchy top-bar icon
+
+On Omarchy 4.5, run this from the project directory in your desktop session
+after the initial `make setup`.
+
+```sh
+make bar-setup
+```
+
+The VoxFlow icon appears beside the system tray. Hover over it to see whether
+VoxFlow is ready for Right Alt, recording, or transcribing and inserting text.
+A red dot indicates recording and an amber dot indicates transcription or
+insertion. The bar displays the widget between takes and after login.
+
+Click the icon to pause VoxFlow for the current login. This cancels an active
+take and disables Right Alt dictation until you click again. The equivalent
+commands are `voxflow pause` and `voxflow resume`. Use `voxflow cancel` to end
+just the current take.
+
+The widget runs inside the Omarchy shell. The `voxflow` worker appears in
+process monitors such as btop only during a take. Use
+`omarchy plugin disable local.voxflow` to remove it from the bar.
 
 ## Codex sign-in
 
@@ -76,8 +99,8 @@ Only one take runs at a time.
 
 1. Focus an editor and hold **Right Alt** until the waveform appears at the bottom center.
 2. Say “This is a VoxFlow test” and watch the waveform respond, then release **Right Alt**.
-3. Leave the cursor in the editor. The transcript should appear when the
-   amber clock disappears.
+3. The waveform should disappear on release. Leave the cursor in the editor
+   and wait for the transcript to appear.
 4. Hold the key again, then press **Super+Shift+Escape**. The badge should vanish and
    the previous clipboard value should still paste.
 

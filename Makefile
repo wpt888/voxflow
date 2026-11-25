@@ -12,7 +12,7 @@ XDG_SHELL = $(shell $(PKG_CONFIG) --variable=pkgdatadir wayland-protocols)/stabl
 PREFIX ?= $(HOME)/.local
 PROTOCOL = protocols/wlr-layer-shell-unstable-v1.xml
 
-.PHONY: all install setup clean test
+.PHONY: all install setup bar-setup clean test
 all: build/voxflow
 
 build:
@@ -46,6 +46,9 @@ install: build/voxflow assets/voxflow.png
 
 setup: install
 	$(PYTHON) scripts/setup.py "$(PREFIX)" "$(DESTDIR)"
+
+bar-setup: install
+	$(PYTHON) scripts/setup_bar.py "$(PREFIX)" "$(DESTDIR)"
 
 clean:
 	rm -rf build
